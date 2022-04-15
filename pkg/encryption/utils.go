@@ -1,6 +1,7 @@
 package encryption
 
 import (
+	"crypto"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -33,6 +34,24 @@ func SecretBytes(secret string) []byte {
 	// If decoding didn't work or resulted in non-AES compliant length,
 	// assume the raw string was the intended secret
 	return []byte(secret)
+}
+
+// AesKey return keys suites to do aes encryption,
+// if len(p) != 16,24,32, then use sha256 sum of p
+func AesKey(nonce, key []byte) []byte {
+	length := len(nonce) + len(key)
+	switch length {
+	case 16, 24, 32:
+		data := make([]byte, length)
+		copy(data, nonce)
+		copy(data[len(nonce):], key)
+		return data
+	default:
+		h := crypto.SHA256.New()
+		h.Write(nonce)
+		h.Write(key)
+		return h.Sum(nil)
+	}
 }
 
 // cookies are stored in a 3 part (value + timestamp + signature) to enforce that the values are as originally set.

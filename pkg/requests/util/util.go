@@ -1,7 +1,10 @@
 package util
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	middlewareapi "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/middleware"
 )
@@ -10,6 +13,7 @@ const (
 	XForwardedProto = "X-Forwarded-Proto"
 	XForwardedHost  = "X-Forwarded-Host"
 	XForwardedURI   = "X-Forwarded-Uri"
+	XAppRedirect    = "X-AppRedirect"
 )
 
 // GetRequestProto returns the request scheme or X-Forwarded-Proto if present
@@ -56,4 +60,21 @@ func IsProxied(req *http.Request) bool {
 func IsForwardedRequest(req *http.Request) bool {
 	return IsProxied(req) &&
 		req.Host != GetRequestHost(req)
+}
+
+func TweakCookieForLocalhost(rw http.ResponseWriter, cookie *http.Cookie) error {
+	appRedirect := rw.Header().Get(XAppRedirect)
+	if len(appRedirect) == 0 {
+		return nil
+	}
+	u, err := url.Parse(appRedirect)
+	if err != nil {
+		return fmt.Errorf("parse appRedirect %s failed, %s", appRedirect, err)
+	}
+	if !strings.HasPrefix(u.Host, "localhost") {
+		return nil
+	}
+	// when set cookie for localhost, domain must not be set
+	cookie.Domain = ""
+	return nil
 }

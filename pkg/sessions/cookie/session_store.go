@@ -12,6 +12,7 @@ import (
 	pkgcookies "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/cookies"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/encryption"
 	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/logger"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests/util"
 )
 
 const (
@@ -103,6 +104,9 @@ func (s *SessionStore) setSessionCookie(rw http.ResponseWriter, req *http.Reques
 		return err
 	}
 	for _, c := range cookies {
+		if err = util.TweakCookieForLocalhost(rw, c); err != nil {
+			logger.Errorf("TweakCookieForLocalhost leads to error: %s\n", err)
+		}
 		http.SetCookie(rw, c)
 	}
 	return nil

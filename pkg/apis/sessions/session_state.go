@@ -30,6 +30,9 @@ type SessionState struct {
 	Groups            []string `msgpack:"g,omitempty"`
 	PreferredUsername string   `msgpack:"pu,omitempty"`
 
+	// this session is created for given appp redirect URL
+	AppRedirect string `msgpack:"rd:omitempty"`
+
 	// Internal helpers, not serialized
 	Clock clock.Clock `msgpack:"-"`
 	Lock  Lock        `msgpack:"-"`

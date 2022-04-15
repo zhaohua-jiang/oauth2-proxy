@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,13 +45,15 @@ const (
 	schemeHTTPS     = "https"
 	applicationJSON = "application/json"
 
-	robotsPath        = "/robots.txt"
-	signInPath        = "/sign_in"
-	signOutPath       = "/sign_out"
-	oauthStartPath    = "/start"
-	oauthCallbackPath = "/callback"
-	authOnlyPath      = "/auth"
-	userInfoPath      = "/userinfo"
+	robotsPath            = "/robots.txt"
+	signInPath            = "/sign_in"
+	signOutPath           = "/sign_out"
+	oauthStartPath        = "/start"
+	oauthCallbackPath     = "/callback"
+	authOnlyPath          = "/auth"
+	userInfoPath          = "/userinfo"
+	localDevLoginPath     = "/local_login"
+	localDevQueryParamKey = "lss"
 )
 
 var (
@@ -308,6 +311,7 @@ func (p *OAuthProxy) buildProxySubrouter(s *mux.Router) {
 	s.Path(signOutPath).HandlerFunc(p.SignOut)
 	s.Path(oauthStartPath).HandlerFunc(p.OAuthStart)
 	s.Path(oauthCallbackPath).HandlerFunc(p.OAuthCallback)
+	s.Path(localDevLoginPath).HandlerFunc(p.LocalDevLogin)
 
 	// The userinfo endpoint needs to load sessions before handling the request
 	s.Path(userInfoPath).Handler(p.sessionChain.ThenFunc(p.UserInfo))
@@ -590,6 +594,40 @@ func (p *OAuthProxy) ManualSignIn(req *http.Request) (string, bool) {
 	return "", false
 }
 
+func (p *OAuthProxy) createLocalDevQueryParam(ss *sessionsapi.SessionState) (string, error) {
+	ciper, err := encryption.NewCFBCipher(encryption.AesKey(nil, []byte(p.CookieOptions.Secret)))
+	if err != nil {
+		return "", fmt.Errorf("createLocalDevQueryParam: new cfb ciper failed: %v", err)
+	}
+	data, err := ss.EncodeSessionState(ciper, true)
+	if err != nil {
+		return "", fmt.Errorf("createLocalDevQueryParam: encode session state failed: %v", err)
+	}
+	return hex.EncodeToString(data), nil
+}
+
+func (p *OAuthProxy) decodeLocalDevQueryParam(req *http.Request) (*sessionsapi.SessionState, error) {
+	ciper, err := encryption.NewCFBCipher(encryption.AesKey(nil, []byte(p.CookieOptions.Secret)))
+	if err != nil {
+		return nil, fmt.Errorf("decodeLocalDevQueryParam: new cfb ciper failed: %v", err)
+	}
+
+	lss := req.URL.Query().Get(localDevQueryParamKey)
+	if len(lss) == 0 {
+		return nil, fmt.Errorf("no local dev query parameter found in request: %s", req.URL.RawQuery)
+	}
+
+	data, err := hex.DecodeString(lss)
+	if err != nil {
+		return nil, fmt.Errorf("deocde locald ev query parameter %s failed, %s", lss, err)
+	}
+	ss, err := sessionsapi.DecodeSessionState(data, ciper, true)
+	if err != nil {
+		return nil, fmt.Errorf("localDevRedirect: decode session state failed: %v", err)
+	}
+	return ss, nil
+}
+
 // SignIn serves a page prompting users to sign in
 func (p *OAuthProxy) SignIn(rw http.ResponseWriter, req *http.Request) {
 	redirect, err := p.appDirector.GetRedirect(req)
@@ -735,6 +773,29 @@ func (p *OAuthProxy) doOAuthStart(rw http.ResponseWriter, req *http.Request, ove
 	http.Redirect(rw, req, loginURL, http.StatusFound)
 }
 
+func (p *OAuthProxy) LocalDevLogin(rw http.ResponseWriter, req *http.Request) {
+	ss, err := p.decodeLocalDevQueryParam(req)
+	if err != nil {
+		p.ErrorPage(rw, req, http.StatusInternalServerError, "no session state find in query parmaeters")
+		return
+	}
+	if len(ss.AppRedirect) == 0 {
+		p.ErrorPage(rw, req, http.StatusInternalServerError, "no app redirect url in session state")
+		return
+	}
+
+	rw.Header().Set(requestutil.XAppRedirect, ss.AppRedirect)
+
+	if err = p.SaveSession(rw, req, ss); err != nil {
+		logger.Errorf("Error saving session state: %v", err)
+		p.ErrorPage(rw, req, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	logger.PrintAuthf(ss.Email, req, logger.AuthSuccess, "save oauth2 session cookie successfully using local login helper: %s", ss)
+	http.Redirect(rw, req, ss.AppRedirect, http.StatusFound)
+}
+
 // OAuthCallback is the OAuth2 authentication flow callback that finishes the
 // OAuth2 authentication flow
 func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
@@ -810,7 +871,27 @@ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
 	}
 	if p.Validator(session.Email) && authorized {
 		logger.PrintAuthf(session.Email, req, logger.AuthSuccess, "Authenticated via OAuth2: %s", session)
-		err := p.SaveSession(rw, req, session)
+		// deal with appRedirect starts with https://localhost
+		u, err := url.Parse(appRedirect)
+		if err != nil {
+			p.ErrorPage(rw, req, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if u.Hostname() == "localhost" {
+			logger.Printf("app redirect is %s, redirect to local login helper link to set session cookie\n", appRedirect)
+			session.AppRedirect = appRedirect
+			q, err := p.createLocalDevQueryParam(session)
+			if err != nil {
+				logger.Printf("createLocalDevQueryParam failed, %s\n", err)
+				p.ErrorPage(rw, req, http.StatusInternalServerError, err.Error())
+				return
+			}
+			localRedirect := fmt.Sprintf("https://%s%s%s?%s=%s", u.Host, p.ProxyPrefix, localDevLoginPath, localDevQueryParamKey, q)
+			http.Redirect(rw, req, localRedirect, http.StatusFound)
+			return
+		}
+
+		err = p.SaveSession(rw, req, session)
 		if err != nil {
 			logger.Errorf("Error saving session state for %s: %v", remoteAddr, err)
 			p.ErrorPage(rw, req, http.StatusInternalServerError, err.Error())
