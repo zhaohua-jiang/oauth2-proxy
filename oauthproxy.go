@@ -784,6 +784,18 @@ func (p *OAuthProxy) LocalDevLogin(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if ss.CreatedAt == nil {
+		p.ErrorPage(rw, req, http.StatusInternalServerError, "invalid session creation time")
+		return
+	}
+
+	now := time.Now()
+	if elapsed := now.Sub(*ss.CreatedAt).Seconds(); elapsed > 10 {
+		logger.Printf("local dev login session is already expired, elapsed %f seconds\n", elapsed)
+		p.ErrorPage(rw, req, http.StatusInternalServerError, "local dev login session is already expired")
+		return
+	}
+
 	rw.Header().Set(requestutil.XAppRedirect, ss.AppRedirect)
 
 	if err = p.SaveSession(rw, req, ss); err != nil {
